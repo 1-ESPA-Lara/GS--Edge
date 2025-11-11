@@ -1,0 +1,451 @@
+// =================== BIBLIOTECAS ===================
+#include <Wire.h>              // Comunicação I2C (usada pelo RTC)
+#include <LiquidCrystal.h>     // Controle do display LCD 16x2
+#include <RTClib.h>            // Biblioteca do módulo RTC DS1307
+#include "DHT.h"               // Biblioteca do sensor DHT22 (temperatura e umidade)
+#include <EEPROM.h>            // Biblioteca para gravar e ler dados da EEPROM
+
+// =================== DEFINIÇÕES ===================
+#define DHTPIN 2               // Pino de dados do sensor DHT
+#define DHTTYPE DHT11          // Define o tipo do sensor DHT
+DHT dht(DHTPIN, DHTTYPE);      // Cria o objeto do sensor DHT
+
+LiquidCrystal lcd(12, 11, 10, 9, 8, 7, 6); // Define os pinos do LCD
+RTC_DS1307 rtc;                            // Cria o objeto do RTC (relógio em tempo real)
+
+const int LED_GREEN = 4;       // LED verde (condições normais)
+const int LED_RED = 5;         // LED vermelho (condições fora dos limites)
+const int BUZZER_PIN = 3;      // Pino do buzzer
+const int JOY_BTN_PIN = 13;    // Pino do botão do joystick
+const int LDR_PIN = A0;        // Pino analógico do sensor LDR (luminosidade)
+
+float temperatura, umidade;    // Armazena leituras do sensor DHT
+int ldrValor;                  // Valor bruto do LDR
+int ldrPercent;                // Valor convertido para porcentagem (0–100%)
+
+unsigned long lastSensorRead = 0;     // Tempo da última leitura do sensor
+unsigned long lastDisplayUpdate = 0;  // Tempo da última atualização do display
+unsigned long lastSecond = 0;         // Controle por segundos
+
+const unsigned long SENSOR_INTERVAL = 5000;  // Intervalo de leitura dos sensores (5s)
+const unsigned long DISPLAY_INTERVAL = 1000; // Intervalo de atualização do display (1s)
+
+float TEMP_MIN = 20.0;  // Temperatura mínima aceitável
+float TEMP_MAX = 28.0;  // Temperatura máxima aceitável
+float LUX_MIN = 30.0;   // Luminosidade mínima aceitável (%)
+float LUX_MAX = 80.0;   // Luminosidade máxima aceitável (%)
+
+// Endereços na EEPROM para armazenar dados
+#define EEPROM_TEMP_ADDR 0     // Endereço da temperatura
+#define EEPROM_LDR_ADDR 10     // Endereço da luminosidade
+
+bool hourlyAlarmActive = false;  // Controle do alarme de hora cheia
+int lastAlarmHour = -1;          // Última hora em que o alarme tocou
+
+// =================== ÍCONES ===================
+// Ícones personalizados (termômetro e lâmpada)
+byte termVazia_b[8] = {B00100,B01010,B01010,B01010,B10001,B10001,B10001,B01110};
+byte termMeio_b[8]  = {B00100,B01010,B01010,B01010,B11111,B11111,B11111,B01110};
+byte termCheia_b[8] = {B00100,B01110,B01110,B01110,B11111,B11111,B11111,B01110};
+byte lampVazia_b[8] = {B01110,B10001,B10001,B10001,B01010,B01110,B00000,B01110};
+byte lampMeio_b[8]  = {B01110,B10001,B10001,B11111,B01110,B01110,B00000,B01110};
+byte lampCheia_b[8] = {B01110,B11111,B11111,B11111,B01110,B01110,B00000,B01110};
+
+// =================== FUNÇÕES DA ANIMAÇÃO ===================
+// Declaração das funções da animação
+void image00(); void image01(); void image02(); void image03();
+void image04(); void image05(); void image06(); void image07();
+
+// Mostra animação inicial no LCD
+void showTeachMeAnimation() {
+  lcd.begin(16, 2);                // Inicializa LCD
+  lcd.setCursor(4,0); lcd.print("Wellness");   // Escreve título na linha 1
+  lcd.setCursor(4,1); lcd.print("Reminder");   // Escreve título na linha 2
+  delay(2000);                     // Espera 2 segundos
+  lcd.clear();                     // Limpa tela
+
+  // Sequência de imagens com pausas (animação)
+  image00(); delay(500);
+  image01(); delay(500);
+  image02(); delay(500);
+  image03(); delay(800);
+  image04(); delay(600);
+  image05(); delay(600);
+  image06(); delay(800);
+  image07(); delay(1500);
+  lcd.clear();                     // Limpa após a animação
+}
+
+// =================== FUNÇÃO SETUP ===================
+void setup() {
+  Serial.begin(115200);            // Inicia comunicação serial
+  lcd.begin(16, 2);                // Inicia o display LCD
+  pinMode(LED_GREEN, OUTPUT);      // Define LED verde como saída
+  pinMode(LED_RED, OUTPUT);        // Define LED vermelho como saída
+  pinMode(BUZZER_PIN, OUTPUT);     // Define buzzer como saída
+  pinMode(JOY_BTN_PIN, INPUT_PULLUP); // Botão joystick com pull-up interno
+
+  dht.begin();                     // Inicia o sensor DHT
+  if (!rtc.begin()) {              // Verifica se o RTC está ok
+    lcd.print("Erro no RTC!");     // Mostra erro no LCD
+    while (1);                     // Para o código
+  }
+
+  showTeachMeAnimation();          // Executa a animação inicial
+
+  // Cria os ícones personalizados
+  lcd.createChar(0, termVazia_b);
+  lcd.createChar(1, termMeio_b);
+  lcd.createChar(2, termCheia_b);
+  lcd.createChar(3, lampVazia_b);
+  lcd.createChar(4, lampMeio_b);
+  lcd.createChar(5, lampCheia_b);
+
+  lcd.clear();                     // Limpa o display
+}
+
+// =================== FUNÇÃO LOOP ===================
+void loop() {
+  DateTime now = rtc.now();        // Lê hora atual do RTC
+
+  // -------- LEITURA DOS SENSORES --------
+  if (millis() - lastSensorRead >= SENSOR_INTERVAL) {
+    lastSensorRead = millis();     // Atualiza tempo da última leitura
+
+    temperatura = dht.readTemperature(); // Lê temperatura
+    umidade = dht.readHumidity();        // Lê umidade
+    int ldrVal = analogRead(LDR_PIN);    // Lê o LDR
+    ldrPercent = map(ldrVal, 0, 1023, 100, 0); // Converte em porcentagem
+
+    // Verifica erro de leitura
+    if (isnan(temperatura) || isnan(umidade)) {
+      lcd.clear();
+      lcd.print("Erro no DHT!");
+      delay(1000);
+      return;                       // Sai do loop para tentar novamente
+    }
+
+    // Grava os valores na EEPROM
+    EEPROM.put(EEPROM_TEMP_ADDR, temperatura);
+    EEPROM.put(EEPROM_LDR_ADDR, ldrPercent);
+  }
+
+  // -------- ATUALIZAÇÃO DO DISPLAY --------
+  if (millis() - lastDisplayUpdate >= DISPLAY_INTERVAL) {
+    lastDisplayUpdate = millis();   // Atualiza tempo do display
+
+    bool tempOk = (temperatura >= TEMP_MIN && temperatura <= TEMP_MAX); // Temperatura ok?
+    bool luxOk = (ldrPercent >= LUX_MIN && ldrPercent <= LUX_MAX);      // Luminosidade ok?
+
+    // LEDS E BUZZER SINCRONIZADOS
+    if (tempOk && luxOk) {
+      digitalWrite(LED_GREEN, HIGH);  // Tudo certo → LED verde aceso
+      digitalWrite(LED_RED, LOW);
+      noTone(BUZZER_PIN);             // Buzzer desligado
+    } else {
+      digitalWrite(LED_GREEN, LOW);
+      digitalWrite(LED_RED, HIGH);    // Problema → LED vermelho aceso
+      tone(BUZZER_PIN, 1000);         // Toca buzzer (1 kHz)
+      delay(1000);                    // Mantém som 1 segundo
+      noTone(BUZZER_PIN);             // Desliga buzzer
+    }
+
+    // -------- CALCULA TEMPO PARA PRÓXIMA PAUSA --------
+    int currentHour = now.hour();
+    int currentMin = now.minute();
+    int currentSec = now.second();
+
+    int segundosDesdeHora = currentMin * 60 + currentSec;
+    int segundosRestantes = 3600 - segundosDesdeHora;
+    int minutosRestantes = segundosRestantes / 60;
+    int segRest = segundosRestantes % 60;
+
+    // -------- EXIBE INFORMAÇÕES NO LCD --------
+    lcd.clear();
+
+    // Linha 1: ícones + valores
+    lcd.setCursor(0,0);
+    if (temperatura < TEMP_MIN) lcd.write(byte(0));  // Ícone termômetro vazio
+    else if (temperatura > TEMP_MAX) lcd.write(byte(2)); // Termômetro cheio
+    else lcd.write(byte(1));                         // Termômetro médio
+
+    lcd.print(temperatura,1);
+    lcd.print((char)223);                            // Símbolo de grau
+    lcd.print("C ");
+
+    if (ldrPercent < LUX_MIN) lcd.write(byte(3));    // Ícone lâmpada vazia
+    else if (ldrPercent > LUX_MAX) lcd.write(byte(5)); // Lâmpada cheia
+    else lcd.write(byte(4));                         // Lâmpada média
+
+    lcd.print(ldrPercent);
+    lcd.print("%");
+
+    // Linha 2: tempo até a próxima pausa
+    lcd.setCursor(0,1);
+    lcd.print("Prox pausa:");
+    if (minutosRestantes < 10) lcd.print("0");
+    lcd.print(minutosRestantes);
+    lcd.print(":");
+    if (segRest < 10) lcd.print("0");
+    lcd.print(segRest);
+  }
+
+  // -------- ALARME DE HORA CHEIA --------
+  if (now.minute() == 0 && now.second() == 0 && now.hour() != lastAlarmHour) {
+    lastAlarmHour = now.hour();     // Marca hora do último alarme
+    tone(BUZZER_PIN, 1000, 1000);   // Toca buzzer por 1 segundo
+    lcd.clear();
+    lcd.print("Hora da pausa!");
+    lcd.setCursor(0,1);
+    lcd.print("Press. joystick");
+
+    // Espera pressionar o botão do joystick
+    while (digitalRead(JOY_BTN_PIN) == HIGH);
+    noTone(BUZZER_PIN);             // Desliga buzzer
+    lcd.clear();                    // Limpa tela
+  }
+}
+
+// =================== FUNÇÕES DE ANIMAÇÃO ===================
+// As funções abaixo desenham quadros no LCD para a animação inicial
+// (cada imageXX cria e exibe diferentes padrões de pixels personalizados)
+
+void image00()
+{
+    lcd.clear();
+ 
+    byte image22[8] = {B00110, B01101, B11011, B10011, B00111, B01111, B01111, B11111};
+    byte image23[8] = {B01111, B11110, B11100, B11000, B11000, B10000, B10000, B00000};
+    byte image07[8] = {B00000, B00000, B00000, B00000, B00000, B00000, B00001, B00111};
+    byte image08[8] = {B00000, B01000, B10000, B10000, B10000, B11111, B11111, B11000};
+    byte image09[8] = {B00000, B00000, B00000, B00000, B00000, B11000, B11000, B00100};
+ 
+    lcd.createChar(0, image22);
+    lcd.createChar(1, image23);
+    lcd.createChar(2, image07);
+    lcd.createChar(3, image08);
+    lcd.createChar(4, image09);
+ 
+    lcd.setCursor(5, 1);
+    lcd.write(byte(0));
+    lcd.setCursor(6, 1);
+    lcd.write(byte(1));
+    lcd.setCursor(6, 0);
+    lcd.write(byte(2));
+    lcd.setCursor(7, 0);
+    lcd.write(byte(3));
+    lcd.setCursor(8, 0);
+    lcd.write(byte(4));
+}
+ 
+void image01()
+{
+    lcd.clear();
+ 
+    byte image22[8] = {B00110, B00101, B00011, B00011, B00111, B01111, B01111, B11111};
+    byte image23[8] = {B01111, B11110, B11100, B11000, B11000, B10000, B10000, B00000};
+    byte image07[8] = {B00000, B00000, B00000, B00000, B00000, B00000, B11001, B10111};
+    byte image08[8] = {B00000, B01000, B10000, B10000, B10000, B11111, B11111, B11000};
+    byte image09[8] = {B00000, B00000, B00000, B00000, B00000, B11000, B11000, B00100};
+    byte image06[8] = {B00000, B00000, B00000, B00000, B00000, B00000, B00000, B00011};
+ 
+    lcd.createChar(0, image22);
+    lcd.createChar(1, image23);
+    lcd.createChar(2, image07);
+    lcd.createChar(3, image08);
+    lcd.createChar(4, image09);
+    lcd.createChar(5, image06);
+ 
+    lcd.setCursor(5, 1);
+    lcd.write(byte(0));
+    lcd.setCursor(6, 1);
+    lcd.write(byte(1));
+    lcd.setCursor(6, 0);
+    lcd.write(byte(2));
+    lcd.setCursor(7, 0);
+    lcd.write(byte(3));
+    lcd.setCursor(8, 0);
+    lcd.write(byte(4));
+    lcd.setCursor(5, 0);
+    lcd.write(byte(5));
+}
+ 
+void image02()
+{
+    lcd.clear();
+ 
+    byte image22[8] = {B00000, B00001, B00011, B00011, B00111, B01111, B01111, B11111};
+    byte image23[8] = {B01111, B11110, B11100, B11000, B11000, B10000, B10000, B00000};
+    byte image07[8] = {B00000, B00000, B00000, B00001, B00111, B00100, B11001, B10111};
+    byte image08[8] = {B00000, B01000, B10000, B10000, B10000, B11111, B11111, B11000};
+    byte image09[8] = {B00000, B00000, B00000, B00000, B00000, B11000, B11000, B00100};
+ 
+    lcd.createChar(0, image22);
+    lcd.createChar(1, image23);
+    lcd.createChar(2, image07);
+    lcd.createChar(3, image08);
+    lcd.createChar(4, image09);
+ 
+    lcd.setCursor(5, 1);
+    lcd.write(byte(0));
+    lcd.setCursor(6, 1);
+    lcd.write(byte(1));
+    lcd.setCursor(6, 0);
+    lcd.write(byte(2));
+    lcd.setCursor(7, 0);
+    lcd.write(byte(3));
+    lcd.setCursor(8, 0);
+    lcd.write(byte(4));
+}
+ 
+void image03()
+{
+    lcd.clear();
+ 
+    byte image22[8] = {B00000, B00001, B00011, B00011, B00111, B01111, B01111, B11111};
+    byte image23[8] = {B01111, B11110, B11100, B11000, B11000, B10000, B10000, B00000};
+    byte image07[8] = {B00000, B00000, B00000, B00000, B00000, B00000, B00001, B00111};
+    byte image08[8] = {B00000, B01000, B10000, B10000, B10000, B11111, B11111, B11010};
+    byte image09[8] = {B00000, B00000, B00000, B00000, B00000, B11000, B11000, B00100};
+    byte image24[8] = {B00010, B00111, B00111, B00111, B00111, B00111, B00010, B00000};
+ 
+    lcd.createChar(0, image22);
+    lcd.createChar(1, image23);
+    lcd.createChar(2, image07);
+    lcd.createChar(3, image08);
+    lcd.createChar(4, image09);
+    lcd.createChar(5, image24);
+ 
+    lcd.setCursor(5, 1);
+    lcd.write(byte(0));
+    lcd.setCursor(6, 1);
+    lcd.write(byte(1));
+    lcd.setCursor(6, 0);
+    lcd.write(byte(2));
+    lcd.setCursor(7, 0);
+    lcd.write(byte(3));
+    lcd.setCursor(8, 0);
+    lcd.write(byte(4));
+    lcd.setCursor(7, 1);
+    lcd.write(byte(5));
+}
+ 
+void image04()
+{
+    lcd.clear();
+ 
+    byte image22[8] = {B00000, B00001, B00011, B00011, B00111, B01111, B01111, B11111};
+    byte image23[8] = {B01111, B11110, B11100, B11000, B11000, B10001, B10000, B00000};
+    byte image07[8] = {B00000, B00000, B00000, B00000, B00000, B00000, B00001, B00111};
+    byte image08[8] = {B00000, B01000, B10000, B10000, B10000, B11111, B11111, B11010};
+    byte image09[8] = {B00000, B00000, B00000, B00000, B00000, B11000, B11000, B00100};
+    byte image24[8] = {B00010, B00100, B01011, B10101, B11010, B10101, B11010, B01110};
+    byte image25[8] = {B00000, B00000, B00000, B10000, B10000, B00000, B00000, B00000};
+ 
+    lcd.createChar(0, image22);
+    lcd.createChar(1, image23);
+    lcd.createChar(2, image07);
+    lcd.createChar(3, image08);
+    lcd.createChar(4, image09);
+    lcd.createChar(5, image24);
+    lcd.createChar(6, image25);
+ 
+    lcd.setCursor(5, 1);
+    lcd.write(byte(0));
+    lcd.setCursor(6, 1);
+    lcd.write(byte(1));
+    lcd.setCursor(6, 0);
+    lcd.write(byte(2));
+    lcd.setCursor(7, 0);
+    lcd.write(byte(3));
+    lcd.setCursor(8, 0);
+    lcd.write(byte(4));
+    lcd.setCursor(7, 1);
+    lcd.write(byte(5));
+    lcd.setCursor(8, 1);
+    lcd.write(byte(6));
+}
+ 
+void image05()
+{
+    lcd.clear();
+ 
+    byte image24[8] = {B01010, B10100, B01011, B10101, B11010, B10101, B11010, B01110};
+    byte image25[8] = {B00000, B00000, B00000, B10000, B10000, B00000, B00000, B00000};
+    byte image23[8] = {B01101, B01010, B01101, B00111, B00000, B00000, B00000, B00000};
+    byte image07[8] = {B00000, B00000, B00000, B00000, B00000, B00000, B00001, B00011};
+    byte image08[8] = {B00000, B00000, B00000, B00000, B00000, B00000, B00000, B10000};
+ 
+    lcd.createChar(0, image24);
+    lcd.createChar(1, image25);
+    lcd.createChar(2, image23);
+    lcd.createChar(3, image07);
+    lcd.createChar(4, image08);
+ 
+    lcd.setCursor(7, 1);
+    lcd.write(byte(0));
+    lcd.setCursor(8, 1);
+    lcd.write(byte(1));
+    lcd.setCursor(6, 1);
+    lcd.write(byte(2));
+    lcd.setCursor(6, 0);
+    lcd.write(byte(3));
+    lcd.setCursor(7, 0);
+    lcd.write(byte(4));
+}
+ 
+void image06()
+{
+    lcd.clear();
+ 
+    byte image08[8] = {B00000, B00100, B01010, B01010, B10001, B00011, B00110, B01100};
+    byte image07[8] = {B00000, B00000, B00000, B00000, B00001, B00010, B00010, B00001};
+    byte image09[8] = {B00000, B00000, B10000, B11000, B00000, B00000, B11000, B00100};
+    byte image24[8] = {B00100, B00100, B00011, B00000, B00000, B00000, B00000, B00000};
+    byte image25[8] = {B10000, B00000, B00000, B00000, B00000, B00000, B00000, B00000};
+ 
+    lcd.createChar(0, image08);
+    lcd.createChar(1, image07);
+    lcd.createChar(2, image09);
+    lcd.createChar(3, image24);
+    lcd.createChar(4, image25);
+ 
+    lcd.setCursor(7, 0);
+    lcd.write(byte(0));
+    lcd.setCursor(6, 0);
+    lcd.write(byte(1));
+    lcd.setCursor(8, 0);
+    lcd.write(byte(2));
+    lcd.setCursor(7, 1);
+    lcd.write(byte(3));
+    lcd.setCursor(8, 1);
+    lcd.write(byte(4));
+}
+ // (As funções image01 até image06 seguem o mesmo padrão — criam diferentes quadros
+// da animação usando caracteres personalizados e os exibem no LCD.)
+
+// Último quadro da animação
+void image07()
+{
+    lcd.clear();
+ 
+    byte image24[8] = {B10101, B01110, B01110, B00100, B10101, B01110, B00100, B11111};
+    byte image08[8] = {B00000, B00100, B01010, B01010, B10001, B00011, B00110, B01100};
+    byte image07[8] = {B00000, B00000, B00000, B00000, B00001, B00010, B00010, B00001};
+    byte image09[8] = {B00000, B00000, B10000, B11000, B00000, B00000, B00000, B00000};
+ 
+    lcd.createChar(0, image24);
+    lcd.createChar(1, image08);
+    lcd.createChar(2, image07);
+    lcd.createChar(3, image09);
+ 
+    lcd.setCursor(7, 1);
+    lcd.write(byte(0));
+    lcd.setCursor(7, 0);
+    lcd.write(byte(1));
+    lcd.setCursor(6, 0);
+    lcd.write(byte(2));
+    lcd.setCursor(8, 0);
+    lcd.write(byte(3));
+}
+
