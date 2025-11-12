@@ -33,7 +33,7 @@ Simulação disponivel no Wokwi:https://wokwi.com/projects/447270124587428865
 Monte o circuito conforme os pinos definidos no código:
 | Componente              | Pino do Arduino     |
 | ----------------------- | ------------------- |
-| DHT22 (data)            | 2                   |
+| DHT11 (data)            | 2                   |
 | Buzzer                  | 3                   |
 | LED Verde               | 4                   |
 | LED Vermelho            | 5                   |
@@ -57,7 +57,7 @@ Monte o circuito conforme os pinos definidos no código:
 | Componente                   | Função                                     |
 | ---------------------------- | ------------------------------------------ |
 | **Arduino UNO**              | Microcontrolador principal                 |
-| **Sensor DHT22**             | Mede temperatura e umidade                 |
+| **Sensor DHT11**             | Mede temperatura e umidade                 |
 | **Sensor LDR**               | Detecta luminosidade ambiente              |
 | **RTC DS1307**               | Mantém controle do tempo e data            |
 | **Display LCD 16x2**         | Exibe informações do sistema               |
